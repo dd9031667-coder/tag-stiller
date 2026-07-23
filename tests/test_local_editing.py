@@ -50,3 +50,30 @@ def test_local_session_marks_missing_and_duplicate_numbers():
     assert "назначен по порядку" in matches[0].note
     assert "повторяется" in matches[1].note
     assert matches[0].track.title == "untagged"
+
+
+def test_local_session_uses_plain_folder_as_album_name():
+    files = [
+        LocalAudioFile(Path("/music/My Album/01 Song.mp3"), None, 1),
+    ]
+    reader = FakeReader({"01 Song.mp3": {}})
+    album, matches = build_local_editing_session(files, reader)
+    assert album.title == "My Album"
+    assert matches[0].track.album == "My Album"
+
+
+def test_local_session_parses_formatted_folder_metadata():
+    files = [
+        LocalAudioFile(
+            Path("/music/Prandi Records - Rimini Open (2000)/01 Song.mp3"),
+            None, 1,
+        ),
+    ]
+    reader = FakeReader({"01 Song.mp3": {}})
+    album, matches = build_local_editing_session(files, reader)
+    assert album.title == "Rimini Open"
+    assert album.album_label == "Prandi Records"
+    assert album.year == "2000"
+    assert matches[0].track.album == "Rimini Open"
+    assert matches[0].track.album_label == "Prandi Records"
+    assert matches[0].track.year == "2000"

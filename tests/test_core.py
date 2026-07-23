@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,30 @@ def test_fixture_parser():
     assert album.tracks[0].duration_seconds == 184
     assert album.tracks[2].disc_number == 3
     assert album.tracks[2].track_number == 4
+
+
+@pytest.mark.parametrize(("head", "expected"), [
+    (
+        '<script type="application/ld+json">'
+        '{"@type":"Product","name":"Rimini Open Vol. 01"}</script>',
+        "Rimini Open Vol. 01",
+    ),
+    (
+        '<meta property="og:title" content="Casa musica - Rimini Open Vol. 01">',
+        "Rimini Open Vol. 01",
+    ),
+    (
+        "<title>Rimini Open Vol. 01 - Casa musica</title>",
+        "Rimini Open Vol. 01",
+    ),
+])
+def test_album_title_fallbacks(head, expected):
+    fixture = Path("tests/fixtures/casa_album.html").read_text()
+    fixture = re.sub(r"<h1>.*?</h1>", "", fixture)
+    fixture = fixture.replace("<html>", f"<html><head>{head}</head>")
+    album = CasaMusicaHtmlParser().parse(fixture)
+    assert album.title == expected
+    assert all(track.album == expected for track in album.tracks)
 
 
 @pytest.mark.parametrize(("source", "expected"), [

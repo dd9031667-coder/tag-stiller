@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -59,8 +60,7 @@ class CasaMusicaHtmlParser(CasaMusicaProvider):
 
     def parse(self, html: str, source_url: str = "") -> AlbumMetadata:
         soup = BeautifulSoup(html, "html.parser")
-        title_node = soup.select_one("h1, [itemprop='name'], .page-title")
-        title = _clean(title_node.get_text(" ", strip=True)) if title_node else ""
+        title = self._album_title(soup)
         page_text = soup.get_text("\n", strip=True)
         album_label = _metadata_value(
             soup, page_text, ("Album Label", "Record Label", "Album-Label"),
@@ -120,6 +120,60 @@ class CasaMusicaHtmlParser(CasaMusicaProvider):
             source_url=source_url,
             album_label=album_label,
         )
+
+    @staticmethod
+    def _album_title(soup: BeautifulSoup) -> str:
+        for script in soup.select("script[type='application/ld+json']"):
+            try:
+                payload = json.loads(script.string or script.get_text())
+            except (json.JSONDecodeError, TypeError):
+                continue
+            items = payload if isinstance(payload, list) else [payload]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                graph = item.get("@graph", [])
+                candidates = [item, *(graph if isinstance(graph, list) else [])]
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    kind = candidate.get("@type", "")
+                    kinds = kind if isinstance(kind, list) else [kind]
+                    if any(value in {"Product", "MusicAlbum"} for value in kinds):
+                        name = _clean(str(candidate.get("name", "")))
+                        if name:
+                            return name
+
+        selectors = (
+            "h1[itemprop='name']",
+            "h1.product_name",
+            "h1.product-title",
+            ".product-detail-name h1",
+            "main h1",
+            "h1",
+        )
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if node:
+                title = _clean(node.get_text(" ", strip=True))
+                if title:
+                    return title
+
+        meta = soup.select_one("meta[property='og:title'], meta[name='og:title']")
+        if meta and meta.get("content"):
+            return CasaMusicaHtmlParser._clean_document_title(str(meta["content"]))
+        if soup.title:
+            return CasaMusicaHtmlParser._clean_document_title(
+                soup.title.get_text(" ", strip=True),
+            )
+        return ""
+
+    @staticmethod
+    def _clean_document_title(value: str) -> str:
+        title = _clean(value)
+        title = re.sub(r"(?i)^\s*casa\s+musica\s*[-–—|:]\s*", "", title)
+        title = re.sub(r"(?i)\s*[-–—|:]\s*casa\s+musica\s*$", "", title)
+        return title.strip()
 
     @staticmethod
     def _find_track_table(soup: BeautifulSoup) -> tuple[Tag | None, dict[str, int]]:

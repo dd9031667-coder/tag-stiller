@@ -34,6 +34,7 @@ from app.services.renaming import (
 from app.services.tagging import build_change_plan
 from app.gui.worker import Worker
 from app.utils.text import split_title_dance_suffix
+from app.utils.drop import classify_dropped_paths
 
 
 HEADERS = [
@@ -49,6 +50,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("TagStiller — теги Casa Musica")
         self.resize(1500, 850)
+        self.setAcceptDrops(True)
         self.album: AlbumMetadata | None = None
         self.files = []
         self.cover_file: Path | None = None
@@ -95,6 +97,15 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(QLabel("Album Label:"), 3, 0)
         source_layout.addWidget(self.album_label, 3, 1, 1, 5)
         layout.addWidget(source_box)
+
+        drop_hint = QLabel(
+            "Можно перетащить сюда сохранённый HTML и/или папку с аудиофайлами"
+        )
+        drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_hint.setStyleSheet(
+            "padding: 7px; border: 1px dashed #888; border-radius: 5px;"
+        )
+        layout.addWidget(drop_hint)
 
         folder_box = QGroupBox("2. Локальные аудиофайлы")
         folder_layout = QHBoxLayout(folder_box)
@@ -201,6 +212,61 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(message)
         logging.info(message)
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            paths = [
+                Path(url.toLocalFile())
+                for url in event.mimeData().urls()
+                if url.isLocalFile()
+            ]
+            try:
+                classify_dropped_paths(paths)
+            except ValueError:
+                event.ignore()
+            else:
+                event.acceptProposedAction()
+                self.statusBar().showMessage(
+                    "Отпустите файл или папку для загрузки"
+                )
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.statusBar().showMessage("Готово")
+        event.accept()
+
+    def dropEvent(self, event):
+        paths = [
+            Path(url.toLocalFile())
+            for url in event.mimeData().urls()
+            if url.isLocalFile()
+        ]
+        try:
+            html_file, folder = classify_dropped_paths(paths)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Не удалось обработать", str(exc))
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._handle_dropped_paths(html_file, folder)
+
+    def _handle_dropped_paths(
+        self,
+        html_file: Path | None,
+        folder: Path | None,
+    ):
+        if folder:
+            self.folder.setText(str(folder))
+        if html_file and folder:
+            self._load_html_path(html_file, after_load=self.scan)
+        elif html_file:
+            self._load_html_path(html_file)
+        elif folder:
+            if self.album:
+                self.scan()
+            else:
+                self.edit_local()
+
     def run_worker(self, function, on_result, busy_text: str):
         self.statusBar().showMessage(busy_text)
         worker = Worker(function)
@@ -226,10 +292,18 @@ class MainWindow(QMainWindow):
     def load_html(self):
         path, _ = QFileDialog.getOpenFileName(self, "Открыть сохранённую страницу", "", "HTML (*.html *.htm)")
         if path:
-            self.run_worker(
-                lambda: CasaMusicaHtmlParser().fetch_album(path),
-                self.album_loaded, "Обработка HTML…",
-            )
+            self._load_html_path(Path(path))
+
+    def _load_html_path(self, path: Path, after_load=None):
+        def loaded(album):
+            self.album_loaded(album)
+            if after_load:
+                after_load()
+
+        self.run_worker(
+            lambda: CasaMusicaHtmlParser().fetch_album(str(path)),
+            loaded, "Обработка HTML…",
+        )
 
     def load_json(self):
         path, _ = QFileDialog.getOpenFileName(self, "Открыть результаты", "", "JSON (*.json)")
@@ -508,8 +582,9 @@ class MainWindow(QMainWindow):
         full_backup_dir = folder / f"tagstiller-files-{stamp}" if self.full_backup.isChecked() else None
 
         def operation():
+            operation_backup_path = backup_path
             paths = [match.local_file.path for match in selected]
-            self.backups.create(paths, backup_path)
+            self.backups.create(paths, operation_backup_path)
             successes, skipped, errors, renamed, rename_errors = [], [], [], [], []
             path_mapping: dict[str, str] = {}
             for match in selected:
@@ -542,7 +617,7 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     logging.exception("Не удалось записать %s", path)
                     errors.append(f"{path.name}: {exc}")
-            self.backups.remap_paths(backup_path, path_mapping)
+            self.backups.remap_paths(operation_backup_path, path_mapping)
             old_folder = folder
             new_folder = folder
             folder_error = ""
@@ -556,14 +631,19 @@ class MainWindow(QMainWindow):
                             if current_path.is_relative_to(old_folder):
                                 moved_path = new_folder / current_path.relative_to(old_folder)
                                 moved_mapping[str(current_path)] = str(moved_path)
-                        backup_path = new_folder / backup_path.name
-                        self.backups.remap_paths(backup_path, moved_mapping)
+                        operation_backup_path = (
+                            new_folder / operation_backup_path.name
+                        )
+                        self.backups.remap_paths(
+                            operation_backup_path, moved_mapping,
+                        )
                 except Exception as exc:
                     logging.exception("Не удалось переименовать папку %s", old_folder)
                     folder_error = str(exc)
                     new_folder = old_folder
             return (
-                successes, skipped, errors, renamed, rename_errors, backup_path,
+                successes, skipped, errors, renamed, rename_errors,
+                operation_backup_path,
                 old_folder, new_folder, folder_error,
             )
 

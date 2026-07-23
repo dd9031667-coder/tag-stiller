@@ -24,16 +24,34 @@ def _first(values: list[dict], field: str) -> str:
     return next((str(item.get(field, "")).strip() for item in values if item.get(field)), "")
 
 
+def _folder_metadata(files: list[LocalAudioFile]) -> tuple[str, str, str]:
+    if not files:
+        return "", "", ""
+    folder_name = files[0].path.parent.name.strip()
+    match = re.fullmatch(
+        r"(?P<label>.+?)\s+-\s+(?P<title>.+?)\s+\((?P<year>(?:19|20)\d{2})\)",
+        folder_name,
+    )
+    if match:
+        return (
+            match.group("title").strip(),
+            match.group("label").strip(),
+            match.group("year"),
+        )
+    return folder_name, "", ""
+
+
 def build_local_editing_session(
     files: list[LocalAudioFile],
     tag_reader: TagReader,
 ) -> tuple[AlbumMetadata, list[TrackMatch]]:
     """Создать редактируемый альбом без внешнего источника метаданных."""
     current_tags = [tag_reader.read_current(local.path) for local in files]
-    album_title = _first(current_tags, "album")
+    folder_title, folder_label, folder_year = _folder_metadata(files)
+    album_title = _first(current_tags, "album") or folder_title
     album_artist = _first(current_tags, "album_artist")
-    album_label = _first(current_tags, "album_label")
-    year = _first(current_tags, "year")
+    album_label = _first(current_tags, "album_label") or folder_label
+    year = _first(current_tags, "year") or folder_year
 
     tracks: list[TrackMetadata] = []
     assigned_by_order: set[int] = set()
