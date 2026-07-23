@@ -4,7 +4,7 @@ from pathlib import Path
 from app.audio.tags import TagOptions
 from app.audio.tags import TagService
 from app.models import AlbumMetadata, LocalAudioFile, MatchStatus, TrackMatch, TrackMetadata
-from app.services.album_io import load_album_json, save_album_json
+from app.services.album_io import load_album_json, save_album_json, update_album_title
 from app.services.backup import BackupService
 from app.services.tagging import build_change_plan
 
@@ -25,6 +25,7 @@ def test_change_plan_keeps_empty_by_default():
     fields = {change.field for change in changes}
     assert "language" not in fields
     assert "title" in fields
+    assert "album" in fields
     assert "dance_tempo" in fields
     assert "genre" not in fields
 
@@ -40,6 +41,13 @@ def test_album_json_roundtrip(tmp_path):
     save_album_json(album, target)
     loaded = load_album_json(target)
     assert loaded == album
+
+
+def test_update_album_title_propagates_to_tracks():
+    album = AlbumMetadata("Old", [_match().track])
+    update_album_title(album, " New Album ")
+    assert album.title == "New Album"
+    assert album.tracks[0].album == "New Album"
 
 
 class FakeTags:
@@ -66,6 +74,20 @@ def test_backup_serialization_and_restore(tmp_path):
     assert errors == []
     assert restored == [str(audio.resolve())]
     assert fake.writes[0][1]["dance_tempo"] == "28"
+
+
+def test_backup_path_remap(tmp_path):
+    old = tmp_path / "old.mp3"
+    new = tmp_path / "new.mp3"
+    old.write_bytes(b"fake")
+    backup_path = tmp_path / "backup.json"
+    service = BackupService(FakeTags())
+    service.create([old], backup_path)
+    old.rename(new)
+
+    service.remap_paths(backup_path, {str(old): str(new)})
+    records = service.load(backup_path)
+    assert records[0].path == str(new.resolve())
 
 
 def test_mp3_tag_write_and_restore(tmp_path):

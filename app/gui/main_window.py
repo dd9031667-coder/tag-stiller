@@ -21,10 +21,16 @@ from app.matching import match_tracks
 from app.models import AlbumMetadata, MatchStatus, TrackMatch
 from app.providers.html_parser import CasaMusicaHtmlParser
 from app.providers.playwright_provider import PlaywrightCasaMusicaProvider
-from app.services.album_io import export_album_csv, load_album_json, save_album_json
+from app.services.album_io import (
+    export_album_csv, load_album_json, save_album_json, update_album_title,
+)
 from app.services.backup import BackupService
+from app.services.renaming import (
+    DEFAULT_RENAME_TEMPLATE, build_audio_filename, rename_audio_file,
+)
 from app.services.tagging import build_change_plan
 from app.gui.worker import Worker
+from app.utils.text import split_title_dance_suffix
 
 
 HEADERS = [
@@ -70,6 +76,10 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(load_html, 0, 3)
         source_layout.addWidget(load_json, 0, 4)
         source_layout.addWidget(install_browser, 0, 5)
+        self.album_title = QLineEdit()
+        self.album_title.setPlaceholderText("Будет получено со страницы; при необходимости можно исправить")
+        source_layout.addWidget(QLabel("Название альбома:"), 1, 0)
+        source_layout.addWidget(self.album_title, 1, 1, 1, 5)
         layout.addWidget(source_box)
 
         folder_box = QGroupBox("2. Локальные аудиофайлы")
@@ -121,6 +131,18 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.overwrite_empty)
         settings_layout.addWidget(self.full_backup)
         layout.addWidget(settings)
+
+        rename_box = QGroupBox("4. Переименование файлов")
+        rename_layout = QHBoxLayout(rename_box)
+        self.rename_files = QCheckBox("Переименовывать после записи тегов")
+        self.rename_template = QLineEdit(DEFAULT_RENAME_TEMPLATE)
+        self.rename_template.setToolTip(
+            "Доступно: {disc}, {disc_prefix}, {track}, {artist}, {title}, {album}, {year}"
+        )
+        rename_layout.addWidget(self.rename_files)
+        rename_layout.addWidget(QLabel("Шаблон:"))
+        rename_layout.addWidget(self.rename_template, 1)
+        layout.addWidget(rename_box)
 
         actions = QHBoxLayout()
         for label, handler in (
@@ -184,8 +206,14 @@ class MainWindow(QMainWindow):
                 self.worker_error(f"Не удалось загрузить JSON: {exc}", "")
 
     def album_loaded(self, album: AlbumMetadata):
+        for track in album.tracks:
+            clean_title, dance_style, dance_tempo = split_title_dance_suffix(track.title)
+            track.title = clean_title
+            track.dance_style = track.dance_style or dance_style
+            track.dance_tempo = track.dance_tempo or dance_tempo
         self.album = album
         self.url.setText(album.source_url)
+        self.album_title.setText(album.title)
         self.append_log(f"Загружен альбом «{album.title}»: {len(album.tracks)} треков.")
         self.rematch()
 
@@ -277,13 +305,25 @@ class MainWindow(QMainWindow):
             self.fill_table()
 
     def _sync_edits(self):
+        if self.album:
+            update_album_title(self.album, self.album_title.text())
         for row, match in enumerate(self.matches):
             match.enabled = self.table.item(row, 0).checkState() == Qt.CheckState.Checked
             match.track.artist = self.table.item(row, 6).text().strip()
-            match.track.title = self.table.item(row, 8).text().strip()
+            title, style_from_title, tempo_from_title = split_title_dance_suffix(
+                self.table.item(row, 8).text()
+            )
+            match.track.title = title
             match.track.language = self.table.item(row, 9).text().strip()
-            match.track.dance_style = self.table.item(row, 10).text().strip()
-            match.track.dance_tempo = self.table.item(row, 11).text().strip()
+            match.track.dance_style = (
+                self.table.item(row, 10).text().strip() or style_from_title
+            )
+            match.track.dance_tempo = (
+                self.table.item(row, 11).text().strip() or tempo_from_title
+            )
+            self.table.item(row, 8).setText(match.track.title)
+            self.table.item(row, 10).setText(match.track.dance_style)
+            self.table.item(row, 11).setText(match.track.dance_tempo)
 
     def options(self):
         kwargs = {name: checkbox.isChecked() for name, checkbox in self.field_checks.items()}
@@ -303,6 +343,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Нет файлов", "Нет выбранных надёжных или проверенных сопоставлений.")
             return
         options = self.options()
+        rename_enabled = self.rename_files.isChecked()
+        rename_template = self.rename_template.text().strip() or DEFAULT_RENAME_TEMPLATE
+        rename_count = 0
+        if rename_enabled:
+            try:
+                targets: set[str] = set()
+                for match in selected:
+                    target_name = build_audio_filename(
+                        match.track, match.local_file.path.suffix, rename_template,
+                    )
+                    target_key = str(
+                        match.local_file.path.with_name(target_name).resolve()
+                    ).casefold()
+                    if target_key in targets:
+                        raise ValueError(f"Несколько треков получат имя «{target_name}».")
+                    targets.add(target_key)
+                    if match.local_file.path.name != target_name:
+                        rename_count += 1
+            except Exception as exc:
+                QMessageBox.critical(self, "Ошибка шаблона", str(exc))
+                return
         total_changes = sum(
             len(build_change_plan(match, self.tags.read_current(match.local_file.path), options))
             for match in selected
@@ -310,6 +371,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self, "Подтверждение записи",
             f"Будут обработаны файлы: {len(selected)}\nИзменений тегов: {total_changes}\n\n"
+            f"Переименований: {rename_count}\n\n"
             "Перед записью будет создан backup JSON. Продолжить?",
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -322,43 +384,64 @@ class MainWindow(QMainWindow):
         def operation():
             paths = [match.local_file.path for match in selected]
             self.backups.create(paths, backup_path)
-            successes, skipped, errors = [], [], []
+            successes, skipped, errors, renamed, rename_errors = [], [], [], [], []
+            path_mapping: dict[str, str] = {}
             for match in selected:
                 path = match.local_file.path
                 try:
                     current = self.tags.read_current(path)
                     changes = build_change_plan(match, current, options)
-                    if not changes:
+                    if changes:
+                        self.tags.write_atomic(
+                            path, {change.field: change.new_value for change in changes},
+                            full_backup_dir,
+                        )
+                    new_path = path
+                    if rename_enabled:
+                        try:
+                            new_path = rename_audio_file(path, match.track, rename_template)
+                            if new_path != path:
+                                path_mapping[str(path)] = str(new_path)
+                                match.local_file.path = new_path
+                                renamed.append(f"{path.name} → {new_path.name}")
+                        except Exception as exc:
+                            rename_errors.append(f"{path.name}: {exc}")
+                    if changes or new_path != path:
+                        successes.append(new_path.name)
+                    else:
                         skipped.append(path.name)
-                        continue
-                    self.tags.write_atomic(
-                        path, {change.field: change.new_value for change in changes},
-                        full_backup_dir,
-                    )
-                    successes.append(path.name)
                 except Exception as exc:
                     logging.exception("Не удалось записать %s", path)
                     errors.append(f"{path.name}: {exc}")
-            return successes, skipped, errors, backup_path
+            self.backups.remap_paths(backup_path, path_mapping)
+            return successes, skipped, errors, renamed, rename_errors, backup_path
 
         self.run_worker(operation, self.write_finished, "Запись тегов…")
 
     def write_finished(self, result):
-        successes, skipped, errors, backup = result
+        successes, skipped, errors, renamed, rename_errors, backup = result
         conflicts = sum(match.status is MatchStatus.RED for match in self.matches)
         excluded = sum(not match.enabled for match in self.matches)
         self.append_log(f"Backup тегов: {backup}")
         self.append_log(
             f"Успешно: {len(successes)}; без изменений: {len(skipped)}; "
-            f"исключено: {excluded}; конфликтов: {conflicts}; ошибки: {len(errors)}."
+            f"переименовано: {len(renamed)}; исключено: {excluded}; "
+            f"конфликтов: {conflicts}; ошибки: {len(errors) + len(rename_errors)}."
         )
+        for item in renamed:
+            self.append_log(f"Переименовано: {item}")
+        for error in rename_errors:
+            self.append_log(f"Теги записаны, но файл не переименован: {error}")
         for error in errors:
             self.append_log(f"Файл не был изменён из-за ошибки записи тегов: {error}")
+        self.fill_table()
         QMessageBox.information(
             self, "Итоговый отчёт",
             f"Успешно: {len(successes)}\nБез изменений: {len(skipped)}\n"
+            f"Переименовано: {len(renamed)}\n"
             f"Исключено пользователем: {excluded}\nКонфликтов: {conflicts}\n"
-            f"Ошибки: {len(errors)}\n\nBackup: {backup}",
+            f"Ошибки записи: {len(errors)}\nОшибки переименования: {len(rename_errors)}"
+            f"\n\nBackup: {backup}",
         )
 
     def restore(self):

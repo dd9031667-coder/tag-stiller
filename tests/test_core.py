@@ -6,7 +6,7 @@ from app.audio.scanner import extract_track_position
 from app.matching import match_tracks
 from app.models import AlbumMetadata, LocalAudioFile, MatchStatus, TrackMetadata
 from app.providers.html_parser import CasaMusicaHtmlParser
-from app.utils.text import normalize_text
+from app.utils.text import normalize_text, split_title_dance_suffix
 
 
 @pytest.mark.parametrize(("name", "expected"), [
@@ -33,11 +33,22 @@ def test_fixture_parser():
     assert album.album_artist == "Prandi Sound Orchestra"
     assert album.year == "2000"
     assert len(album.tracks) == 3
+    assert album.tracks[0].title == "Spring"
     assert album.tracks[0].dance_style == "Slow Waltz"
     assert album.tracks[0].dance_tempo == "29"
     assert album.tracks[0].duration_seconds == 184
     assert album.tracks[2].disc_number == 3
     assert album.tracks[2].track_number == 4
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("Spring (Slow Waltz 29)", ("Spring", "Slow Waltz", "29")),
+    ("Blue Moon (Slowfox 29 BPM)", ("Blue Moon", "Slowfox", "29")),
+    ("Tango canción (Tango 32,5)", ("Tango canción", "Tango", "32.5")),
+    ("Song (Live)", ("Song (Live)", "", "")),
+])
+def test_split_title_dance_suffix(source, expected):
+    assert split_title_dance_suffix(source) == expected
 
 
 def _track(number=1, duration=100.0, title="Song"):

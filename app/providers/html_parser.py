@@ -7,10 +7,7 @@ from bs4 import BeautifulSoup, Tag
 
 from app.models import AlbumMetadata, TrackMetadata
 from app.providers.base import CasaMusicaProvider, ProviderError
-from app.utils.text import parse_duration
-
-
-_DANCE_RE = re.compile(r"\(([^()]*?)\s+(\d{2,3}(?:[.,]\d+)?)\)\s*$")
+from app.utils.text import parse_duration, split_title_dance_suffix
 
 
 def _clean(value: str) -> str:
@@ -57,12 +54,12 @@ class CasaMusicaHtmlParser(CasaMusicaProvider):
                 continue
             disc = int(number_match.group(1)) if number_match.group(1) else None
             number = int(number_match.group(2))
-            track_title = self._cell(values, headers, ("title", "titel"))
+            raw_title = self._cell(values, headers, ("title", "titel"))
             artist = self._cell(values, headers, ("artist", "interpret"))
             language = self._cell(values, headers, ("language", "sprache"))
             site_style = self._cell(values, headers, ("style", "dance", "stil", "tanz"))
             length = self._cell(values, headers, ("length", "duration", "dauer", "time"))
-            dance_style, tempo = self._dance_data(track_title)
+            track_title, dance_style, tempo = split_title_dance_suffix(raw_title)
             tracks.append(TrackMetadata(
                 disc_number=disc,
                 track_number=number,
@@ -101,8 +98,3 @@ class CasaMusicaHtmlParser(CasaMusicaProvider):
         if aliases[0] in ("#", "no") and values:
             return values[0]
         return ""
-
-    @staticmethod
-    def _dance_data(title: str) -> tuple[str, str]:
-        match = _DANCE_RE.search(title)
-        return (match.group(1).strip(), match.group(2).replace(",", ".")) if match else ("", "")

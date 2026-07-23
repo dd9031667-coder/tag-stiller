@@ -8,6 +8,13 @@ from pathlib import Path
 from app.models import AlbumMetadata
 
 
+def update_album_title(album: AlbumMetadata, title: str) -> None:
+    """Синхронизировать название альбома в контейнере и во всех треках."""
+    album.title = title.strip()
+    for track in album.tracks:
+        track.album = album.title
+
+
 def save_album_json(album: AlbumMetadata, path: str | Path) -> None:
     Path(path).write_text(
         json.dumps(album.to_dict(), ensure_ascii=False, indent=2),
@@ -29,4 +36,3 @@ def export_album_csv(album: AlbumMetadata, path: str | Path) -> None:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(asdict(track) for track in album.tracks)
-

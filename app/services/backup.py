@@ -50,3 +50,21 @@ class BackupService:
                 errors.append(f"{record.path}: {exc}")
         return restored, errors
 
+    @staticmethod
+    def remap_paths(backup_path: str | Path, mapping: dict[str, str]) -> None:
+        """Обновить пути backup после успешного переименования файлов."""
+        if not mapping:
+            return
+        path = Path(backup_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        normalized = {
+            str(Path(old).resolve()): str(Path(new).resolve())
+            for old, new in mapping.items()
+        }
+        for record in payload.get("records", []):
+            old_path = str(Path(record["path"]).resolve())
+            if old_path in normalized:
+                record["path"] = normalized[old_path]
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
