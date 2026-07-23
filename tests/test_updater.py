@@ -1,7 +1,11 @@
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from app.services.updater import (
-    ARCHIVE_NAME, CHECKSUM_NAME, is_newer_version, parse_release, version_tuple,
+    ARCHIVE_NAME, CHECKSUM_NAME, PreparedUpdate, is_newer_version,
+    launch_prepared_update, parse_release, version_tuple,
 )
 
 
@@ -41,3 +45,22 @@ def test_release_requires_archive_and_checksum():
                 "browser_download_url": "https://example.test/app.zip",
             }],
         })
+
+
+def test_updater_process_starts_outside_application_folder(tmp_path):
+    application = tmp_path / "TagStiller"
+    application.mkdir()
+    script = tmp_path / "scripts" / "update.ps1"
+    script.parent.mkdir()
+    script.write_text("", encoding="utf-8")
+    update = PreparedUpdate(
+        version="2.0.0",
+        source_dir=tmp_path / "new",
+        target_dir=application,
+        executable_name="TagStiller.exe",
+        script_path=script,
+    )
+    with patch("app.services.updater.subprocess.Popen") as popen:
+        launch_prepared_update(update)
+    assert Path(popen.call_args.kwargs["cwd"]) == script.parent
+    assert Path(popen.call_args.kwargs["cwd"]) != application

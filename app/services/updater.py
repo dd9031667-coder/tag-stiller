@@ -153,7 +153,23 @@ $backupDir = "$TargetDir.tagstiller-old-$ProcessId"
 
 try {
     Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    Move-Item -LiteralPath $TargetDir -Destination $backupDir
+    $targetMoved = $false
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
+        try {
+            Move-Item -LiteralPath $TargetDir -Destination $backupDir
+            $targetMoved = $true
+            break
+        }
+        catch {
+            if ($attempt -eq 30) {
+                throw
+            }
+            Start-Sleep -Seconds 1
+        }
+    }
+    if (-not $targetMoved) {
+        throw "Папка приложения всё ещё используется другим процессом."
+    }
     try {
         Move-Item -LiteralPath $SourceDir -Destination $TargetDir
     }
@@ -246,6 +262,7 @@ def launch_prepared_update(update: PreparedUpdate) -> None:
     ]
     subprocess.Popen(
         command,
+        cwd=str(update.script_path.parent),
         close_fds=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
