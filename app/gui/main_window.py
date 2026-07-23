@@ -6,15 +6,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QSettings, Qt, QThreadPool, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDoubleSpinBox, QFileDialog,
-    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPushButton, QPlainTextEdit, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+    QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from app import __version__
 from app.audio.artwork import find_cover_image, load_cover_image
 from app.audio.scanner import inspect_audio, scan_folder
 from app.audio.tags import TagOptions, TagService
@@ -27,11 +28,18 @@ from app.services.album_io import (
 )
 from app.services.backup import BackupService
 from app.services.local_editing import build_local_editing_session
+from app.services.rename_templates import (
+    DEFAULT_TEMPLATE_NAME, dump_template_mapping, load_template_mapping,
+)
 from app.services.renaming import (
     DEFAULT_RENAME_TEMPLATE, album_folder_target, build_audio_filename,
     rename_album_folder, rename_audio_file,
 )
 from app.services.tagging import build_change_plan
+from app.services.updater import (
+    can_install_automatically, discard_prepared_update, fetch_latest_release,
+    is_newer_version, launch_prepared_update, prepare_update,
+)
 from app.gui.worker import Worker
 from app.utils.text import split_title_dance_suffix
 from app.utils.drop import classify_dropped_paths
@@ -56,6 +64,7 @@ class MainWindow(QMainWindow):
         self.cover_file: Path | None = None
         self.matches: list[TrackMatch] = []
         self.pool = QThreadPool.globalInstance()
+        self.settings = QSettings("TagStiller", "TagStiller")
         self.tags = TagService()
         self.backups = BackupService(self.tags)
         self._build_ui()
@@ -169,14 +178,30 @@ class MainWindow(QMainWindow):
         rename_box = QGroupBox("4. Переименование файлов и папки")
         rename_layout = QHBoxLayout(rename_box)
         self.rename_files = QCheckBox("Переименовывать после записи тегов")
-        self.rename_template = QLineEdit(DEFAULT_RENAME_TEMPLATE)
+        last_template = str(
+            self.settings.value("rename/last_template", DEFAULT_RENAME_TEMPLATE)
+        )
+        self.rename_template = QLineEdit(last_template or DEFAULT_RENAME_TEMPLATE)
         self.rename_template.textEdited.connect(self._rename_template_edited)
+        self.rename_template.editingFinished.connect(self._persist_last_template)
         self.rename_template.setToolTip(
             "Доступно: {disc}, {disc_prefix}, {track}, {artist}, {title}, {album}, {year}"
         )
+        self.rename_presets = QComboBox()
+        self.rename_presets.setMinimumWidth(140)
+        self._reload_rename_presets()
+        self.rename_presets.currentTextChanged.connect(self._apply_rename_preset)
+        save_template = QPushButton("Сохранить шаблон")
+        save_template.clicked.connect(self.save_rename_template)
+        delete_template = QPushButton("Удалить шаблон")
+        delete_template.clicked.connect(self.delete_rename_template)
         rename_layout.addWidget(self.rename_files)
+        rename_layout.addWidget(QLabel("Пресет:"))
+        rename_layout.addWidget(self.rename_presets)
         rename_layout.addWidget(QLabel("Шаблон:"))
         rename_layout.addWidget(self.rename_template, 1)
+        rename_layout.addWidget(save_template)
+        rename_layout.addWidget(delete_template)
         self.rename_folder = QCheckBox(
             "Переименовать папку: Album Label - Album Name (Album Year)"
         )
@@ -185,6 +210,7 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         for label, handler in (
+            ("Очистить всё", self.reset_all),
             ("Сохранить JSON", self.save_json), ("Экспорт CSV", self.save_csv),
             ("Восстановить из backup", self.restore), ("Записать теги", self.write_tags),
         ):
@@ -192,6 +218,10 @@ class MainWindow(QMainWindow):
             button.clicked.connect(handler)
             actions.addWidget(button)
         actions.addStretch()
+        actions.addWidget(QLabel(f"Версия {__version__}"))
+        self.update_button = QPushButton("Проверить обновления")
+        self.update_button.clicked.connect(self.check_for_updates)
+        actions.addWidget(self.update_button)
         layout.addLayout(actions)
 
         self.log = QPlainTextEdit()
@@ -207,6 +237,124 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Переименование включено: новый шаблон применится даже без изменений тегов"
         )
+
+    def _template_mapping(self) -> dict[str, str]:
+        raw = self.settings.value("rename/templates", "")
+        return load_template_mapping(str(raw) if raw else "")
+
+    def _reload_rename_presets(self, selected_name: str | None = None):
+        templates = self._template_mapping()
+        self.rename_presets.blockSignals(True)
+        self.rename_presets.clear()
+        names = [DEFAULT_TEMPLATE_NAME] + sorted(
+            name for name in templates if name != DEFAULT_TEMPLATE_NAME
+        )
+        for name in names:
+            self.rename_presets.addItem(name, templates[name])
+        if selected_name in names:
+            self.rename_presets.setCurrentText(selected_name)
+        self.rename_presets.blockSignals(False)
+
+    def _apply_rename_preset(self, _name: str):
+        template = self.rename_presets.currentData()
+        if template:
+            self.rename_template.setText(str(template))
+            self.rename_files.setChecked(True)
+            self._persist_last_template()
+
+    def _persist_last_template(self):
+        template = self.rename_template.text().strip() or DEFAULT_RENAME_TEMPLATE
+        self.settings.setValue("rename/last_template", template)
+
+    def save_rename_template(self):
+        template = self.rename_template.text().strip()
+        if not template:
+            QMessageBox.warning(self, "Пустой шаблон", "Введите шаблон переименования.")
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Сохранить шаблон", "Название шаблона:",
+        )
+        name = name.strip()
+        if not accepted or not name:
+            return
+        if name == DEFAULT_TEMPLATE_NAME:
+            QMessageBox.warning(
+                self, "Зарезервированное имя",
+                f"Название «{DEFAULT_TEMPLATE_NAME}» нельзя заменить.",
+            )
+            return
+        templates = self._template_mapping()
+        if name in templates and QMessageBox.question(
+            self, "Заменить шаблон",
+            f"Шаблон «{name}» уже существует. Заменить его?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        templates[name] = template
+        self.settings.setValue(
+            "rename/templates", dump_template_mapping(templates),
+        )
+        self._persist_last_template()
+        self._reload_rename_presets(name)
+        self.append_log(f"Шаблон переименования сохранён: {name}.")
+
+    def delete_rename_template(self):
+        name = self.rename_presets.currentText()
+        if not name or name == DEFAULT_TEMPLATE_NAME:
+            QMessageBox.information(
+                self, "Шаблон по умолчанию",
+                "Шаблон по умолчанию удалить нельзя.",
+            )
+            return
+        if QMessageBox.question(
+            self, "Удалить шаблон", f"Удалить сохранённый шаблон «{name}»?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        templates = self._template_mapping()
+        templates.pop(name, None)
+        self.settings.setValue(
+            "rename/templates", dump_template_mapping(templates),
+        )
+        self._reload_rename_presets(DEFAULT_TEMPLATE_NAME)
+        self.append_log(f"Шаблон переименования удалён: {name}.")
+
+    def reset_all(self):
+        if QMessageBox.question(
+            self, "Очистить всё",
+            "Очистить загруженный альбом, папку, таблицу, журнал и настройки тегов?\n\n"
+            "Текущий шаблон переименования и сохранённые пресеты останутся.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._reset_application_state()
+
+    def _reset_application_state(self):
+        preserved_template = (
+            self.rename_template.text().strip() or DEFAULT_RENAME_TEMPLATE
+        )
+        self.album = None
+        self.files = []
+        self.matches = []
+        self.cover_file = None
+        self.url.clear()
+        self.folder.clear()
+        self.album_title.clear()
+        self.album_artist.clear()
+        self.album_year.clear()
+        self.album_label.clear()
+        self.table.setRowCount(0)
+        self.log.clear()
+        self.cover_label.setText("Обложка: не найдена")
+        self.tolerance.setValue(4)
+        for checkbox in self.field_checks.values():
+            checkbox.setChecked(True)
+        self.genre.setChecked(False)
+        self.overwrite_empty.setChecked(False)
+        self.full_backup.setChecked(False)
+        self.write_cover.setChecked(True)
+        self.rename_files.setChecked(False)
+        self.rename_folder.setChecked(False)
+        self.rename_template.setText(preserved_template)
+        self.settings.setValue("rename/last_template", preserved_template)
+        self.statusBar().showMessage("Режим preview: файлы не изменяются")
 
     def append_log(self, message: str):
         self.log.appendPlainText(message)
@@ -274,10 +422,78 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self.worker_error)
         worker.signals.finished.connect(lambda: self.statusBar().showMessage("Готово"))
         self.pool.start(worker)
+        return worker
 
     def worker_error(self, message: str, details: str):
         self.append_log(f"Ошибка: {message}")
         QMessageBox.critical(self, "Ошибка", message or "Операция не выполнена. Подробности записаны в лог.")
+
+    def check_for_updates(self):
+        self.update_button.setEnabled(False)
+        worker = self.run_worker(
+            fetch_latest_release,
+            self._update_checked,
+            "Проверка обновлений…",
+        )
+        worker.signals.finished.connect(
+            lambda: self.update_button.setEnabled(True)
+        )
+
+    def _update_checked(self, release):
+        if not is_newer_version(release.version, __version__):
+            QMessageBox.information(
+                self,
+                "Обновления",
+                f"Установлена актуальная версия TagStiller {__version__}.",
+            )
+            return
+
+        if not can_install_automatically():
+            answer = QMessageBox.question(
+                self,
+                "Доступно обновление",
+                f"Доступна версия {release.version}.\n\n"
+                "Автоматическая установка работает в собранной Windows-версии. "
+                "Открыть страницу загрузки?",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl(release.page_url))
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Доступно обновление",
+            f"Доступна версия {release.version} (сейчас {__version__}).\n\n"
+            "Скачать, установить и перезапустить приложение?\n"
+            "Несохранённые изменения в окне будут потеряны.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.update_button.setEnabled(False)
+        worker = self.run_worker(
+            lambda: prepare_update(release),
+            self._install_prepared_update,
+            "Загрузка и проверка обновления…",
+        )
+        worker.signals.finished.connect(
+            lambda: self.update_button.setEnabled(True)
+        )
+
+    def _install_prepared_update(self, update):
+        try:
+            launch_prepared_update(update)
+        except Exception as exc:
+            discard_prepared_update(update)
+            QMessageBox.critical(
+                self,
+                "Ошибка обновления",
+                f"Не удалось запустить установку: {exc}",
+            )
+            return
+        self.append_log(
+            f"Обновление {update.version} подготовлено. Перезапуск приложения…"
+        )
+        QApplication.instance().quit()
 
     def load_url(self):
         url = self.url.text().strip()
