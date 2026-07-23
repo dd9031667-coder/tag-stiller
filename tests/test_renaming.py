@@ -4,6 +4,7 @@ import pytest
 
 from app.models import TrackMetadata
 from app.services.renaming import (
+    FOLDER_FORMAT_LABEL_TITLE_YEAR, FOLDER_FORMAT_TITLE_YEAR,
     album_folder_target, build_album_folder_name, build_audio_filename,
     rename_album_folder, rename_audio_file, sanitize_filename_component,
 )
@@ -54,12 +55,18 @@ def test_build_and_rename_album_folder(tmp_path):
         "Rimini Open Vol. 01", album_artist="Prandi Sound Orchestra",
         year="2000", album_label="Prandi Sound Records",
     )
-    assert build_album_folder_name(album) == (
+    assert build_album_folder_name(
+        album, FOLDER_FORMAT_LABEL_TITLE_YEAR,
+    ) == (
         "Prandi Sound Records - Rimini Open Vol. 01 (2000)"
     )
     expected = tmp_path / "Prandi Sound Records - Rimini Open Vol. 01 (2000)"
-    assert album_folder_target(source, album) == expected
-    renamed = rename_album_folder(source, album)
+    assert album_folder_target(
+        source, album, FOLDER_FORMAT_LABEL_TITLE_YEAR,
+    ) == expected
+    renamed = rename_album_folder(
+        source, album, FOLDER_FORMAT_LABEL_TITLE_YEAR,
+    )
     assert renamed == expected
     assert (renamed / "track.mp3").read_bytes() == b"audio"
 
@@ -71,3 +78,19 @@ def test_album_folder_collision_is_rejected(tmp_path):
     album_folder_target(source, album).mkdir()
     with pytest.raises(FileExistsError):
         rename_album_folder(source, album)
+
+
+def test_build_album_folder_as_title_and_year():
+    album = AlbumMetadata(
+        "Rimini Open Vol. 01",
+        year="2000",
+        album_label="Prandi Sound Records",
+    )
+    assert build_album_folder_name(
+        album, FOLDER_FORMAT_TITLE_YEAR,
+    ) == "Rimini Open Vol. 01 - 2000"
+
+
+def test_title_and_year_format_handles_missing_year():
+    album = AlbumMetadata("Rimini Open Vol. 01")
+    assert build_album_folder_name(album) == "Rimini Open Vol. 01"

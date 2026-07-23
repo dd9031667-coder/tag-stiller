@@ -32,8 +32,10 @@ from app.services.rename_templates import (
     DEFAULT_TEMPLATE_NAME, dump_template_mapping, load_template_mapping,
 )
 from app.services.renaming import (
-    DEFAULT_RENAME_TEMPLATE, album_folder_target, build_audio_filename,
-    rename_album_folder, rename_audio_file,
+    DEFAULT_FOLDER_FORMAT, DEFAULT_RENAME_TEMPLATE,
+    FOLDER_FORMAT_LABEL_TITLE_YEAR, FOLDER_FORMAT_TITLE_YEAR,
+    album_folder_target, build_audio_filename, rename_album_folder,
+    rename_audio_file,
 )
 from app.services.tagging import build_change_plan
 from app.services.updater import (
@@ -202,10 +204,17 @@ class MainWindow(QMainWindow):
         rename_layout.addWidget(self.rename_template, 1)
         rename_layout.addWidget(save_template)
         rename_layout.addWidget(delete_template)
-        self.rename_folder = QCheckBox(
-            "Переименовать папку: Album Label - Album Name (Album Year)"
+        self.rename_folder = QCheckBox("Переименовать папку после записи тегов")
+        self.folder_format = QComboBox()
+        self.folder_format.addItem(
+            "Album Name - Album Year", FOLDER_FORMAT_TITLE_YEAR,
+        )
+        self.folder_format.addItem(
+            "Album Label - Album Name (Album Year)",
+            FOLDER_FORMAT_LABEL_TITLE_YEAR,
         )
         rename_layout.addWidget(self.rename_folder)
+        rename_layout.addWidget(self.folder_format)
         layout.addWidget(rename_box)
 
         actions = QHBoxLayout()
@@ -352,6 +361,9 @@ class MainWindow(QMainWindow):
         self.write_cover.setChecked(True)
         self.rename_files.setChecked(False)
         self.rename_folder.setChecked(False)
+        self.folder_format.setCurrentIndex(
+            self.folder_format.findData(DEFAULT_FOLDER_FORMAT)
+        )
         self.rename_template.setText(preserved_template)
         self.settings.setValue("rename/last_template", preserved_template)
         self.statusBar().showMessage("Режим preview: файлы не изменяются")
@@ -749,6 +761,7 @@ class MainWindow(QMainWindow):
                 return
         rename_enabled = self.rename_files.isChecked()
         folder_rename_enabled = self.rename_folder.isChecked()
+        folder_format = self.folder_format.currentData() or DEFAULT_FOLDER_FORMAT
         rename_template = self.rename_template.text().strip() or DEFAULT_RENAME_TEMPLATE
         rename_count = 0
         if rename_enabled:
@@ -772,7 +785,9 @@ class MainWindow(QMainWindow):
         folder = Path(self.folder.text() or selected[0].local_file.path.parent).resolve()
         folder_target = None
         if folder_rename_enabled:
-            folder_target = album_folder_target(folder, self.album)
+            folder_target = album_folder_target(
+                folder, self.album, folder_format,
+            )
             if folder_target != folder and folder_target.exists():
                 QMessageBox.critical(
                     self, "Папка уже существует",
@@ -839,7 +854,9 @@ class MainWindow(QMainWindow):
             folder_error = ""
             if folder_rename_enabled:
                 try:
-                    new_folder = rename_album_folder(old_folder, self.album)
+                    new_folder = rename_album_folder(
+                        old_folder, self.album, folder_format,
+                    )
                     if new_folder != old_folder:
                         moved_mapping: dict[str, str] = {}
                         for match in selected:
