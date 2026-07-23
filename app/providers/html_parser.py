@@ -14,7 +14,35 @@ def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _metadata_value(text: str, labels: tuple[str, ...]) -> str:
+def _metadata_value(soup: BeautifulSoup, text: str, labels: tuple[str, ...]) -> str:
+    normalized_labels = {label.casefold().rstrip(":") for label in labels}
+    for node in soup.find_all(string=True):
+        node_text = _clean(str(node)).casefold().rstrip(":")
+        if node_text not in normalized_labels:
+            continue
+        parent = node.parent
+        if parent is None:
+            continue
+        if parent.name == "dt":
+            sibling = parent.find_next_sibling("dd")
+            if sibling:
+                value = _clean(sibling.get_text(" ", strip=True))
+                if value:
+                    return value
+        row = parent.find_parent("tr")
+        if row:
+            cells = row.find_all(["th", "td"])
+            for index, cell in enumerate(cells[:-1]):
+                if _clean(cell.get_text(" ", strip=True)).casefold().rstrip(":") in normalized_labels:
+                    value = _clean(cells[index + 1].get_text(" ", strip=True))
+                    if value:
+                        return value
+        container = parent.parent
+        if container:
+            parts = [_clean(part) for part in container.stripped_strings]
+            for index, part in enumerate(parts[:-1]):
+                if part.casefold().rstrip(":") in normalized_labels and parts[index + 1]:
+                    return parts[index + 1]
     for label in labels:
         match = re.search(rf"{re.escape(label)}\s*:?\s*([^\n\r]+)", text, re.I)
         if match:
@@ -34,8 +62,15 @@ class CasaMusicaHtmlParser(CasaMusicaProvider):
         title_node = soup.select_one("h1, [itemprop='name'], .page-title")
         title = _clean(title_node.get_text(" ", strip=True)) if title_node else ""
         page_text = soup.get_text("\n", strip=True)
-        album_artist = _metadata_value(page_text, ("Album Artist", "Album interpret"))
-        year = _metadata_value(page_text, ("Album Year", "Release Year"))
+        album_label = _metadata_value(
+            soup, page_text, ("Album Label", "Record Label", "Album-Label"),
+        )
+        album_artist = _metadata_value(
+            soup, page_text, ("Album Artist", "Album interpret"),
+        )
+        year = _metadata_value(soup, page_text, ("Album Year", "Release Year"))
+        year_match = re.search(r"\b(?:19|20)\d{2}\b", year)
+        year = year_match.group(0) if year_match else year
 
         table, headers = self._find_track_table(soup)
         if table is None:
@@ -73,10 +108,18 @@ class CasaMusicaHtmlParser(CasaMusicaProvider):
                 album_artist=album_artist,
                 year=year,
                 source_url=source_url,
+                album_label=album_label,
             ))
         if not tracks:
             raise ProviderError("Таблица найдена, но строки треков распознать не удалось.")
-        return AlbumMetadata(title, tracks, album_artist, year, source_url)
+        return AlbumMetadata(
+            title=title,
+            tracks=tracks,
+            album_artist=album_artist,
+            year=year,
+            source_url=source_url,
+            album_label=album_label,
+        )
 
     @staticmethod
     def _find_track_table(soup: BeautifulSoup) -> tuple[Tag | None, dict[str, int]]:

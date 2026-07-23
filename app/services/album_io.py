@@ -15,6 +15,24 @@ def update_album_title(album: AlbumMetadata, title: str) -> None:
         track.album = album.title
 
 
+def update_album_details(
+    album: AlbumMetadata,
+    *,
+    title: str,
+    album_artist: str,
+    year: str,
+    album_label: str,
+) -> None:
+    update_album_title(album, title)
+    album.album_artist = album_artist.strip()
+    album.year = year.strip()
+    album.album_label = album_label.strip()
+    for track in album.tracks:
+        track.album_artist = album.album_artist
+        track.year = album.year
+        track.album_label = album.album_label
+
+
 def save_album_json(album: AlbumMetadata, path: str | Path) -> None:
     Path(path).write_text(
         json.dumps(album.to_dict(), ensure_ascii=False, indent=2),

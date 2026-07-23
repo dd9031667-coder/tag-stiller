@@ -13,6 +13,7 @@ def desired_values(match: TrackMatch) -> dict[str, str | int]:
         "title": track.title,
         "album": track.album,
         "album_artist": track.album_artist,
+        "album_label": track.album_label,
         "language": track.language,
         "dance_style": track.dance_style,
         "dance_tempo": track.dance_tempo,
@@ -42,4 +43,3 @@ def build_change_plan(
         if old != wanted["dance_style"]:
             changes.append(TagChange("genre", old, wanted["dance_style"]))
     return changes
-

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from app.audio.artwork import find_cover_image, load_cover_image
 from app.audio.scanner import inspect_audio, scan_folder
 from app.audio.tags import TagOptions, TagService
 from app.matching import match_tracks
@@ -22,7 +23,7 @@ from app.models import AlbumMetadata, MatchStatus, TrackMatch
 from app.providers.html_parser import CasaMusicaHtmlParser
 from app.providers.playwright_provider import PlaywrightCasaMusicaProvider
 from app.services.album_io import (
-    export_album_csv, load_album_json, save_album_json, update_album_title,
+    export_album_csv, load_album_json, save_album_json, update_album_details,
 )
 from app.services.backup import BackupService
 from app.services.renaming import (
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 850)
         self.album: AlbumMetadata | None = None
         self.files = []
+        self.cover_file: Path | None = None
         self.matches: list[TrackMatch] = []
         self.pool = QThreadPool.globalInstance()
         self.tags = TagService()
@@ -80,6 +82,16 @@ class MainWindow(QMainWindow):
         self.album_title.setPlaceholderText("Будет получено со страницы; при необходимости можно исправить")
         source_layout.addWidget(QLabel("Название альбома:"), 1, 0)
         source_layout.addWidget(self.album_title, 1, 1, 1, 5)
+        self.album_artist = QLineEdit()
+        self.album_year = QLineEdit()
+        self.album_year.setMaximumWidth(100)
+        self.album_label = QLineEdit()
+        source_layout.addWidget(QLabel("Album Artist:"), 2, 0)
+        source_layout.addWidget(self.album_artist, 2, 1, 1, 2)
+        source_layout.addWidget(QLabel("Год:"), 2, 3)
+        source_layout.addWidget(self.album_year, 2, 4)
+        source_layout.addWidget(QLabel("Album Label:"), 3, 0)
+        source_layout.addWidget(self.album_label, 3, 1, 1, 5)
         layout.addWidget(source_box)
 
         folder_box = QGroupBox("2. Локальные аудиофайлы")
@@ -93,11 +105,16 @@ class MainWindow(QMainWindow):
         self.tolerance.setRange(0, 60)
         self.tolerance.setValue(4)
         self.tolerance.setSuffix(" с")
+        self.write_cover = QCheckBox("Записывать cover")
+        self.write_cover.setChecked(True)
+        self.cover_label = QLabel("Обложка: не найдена")
         folder_layout.addWidget(self.folder, 1)
         folder_layout.addWidget(choose)
         folder_layout.addWidget(scan)
         folder_layout.addWidget(QLabel("Допуск длительности:"))
         folder_layout.addWidget(self.tolerance)
+        folder_layout.addWidget(self.write_cover)
+        folder_layout.addWidget(self.cover_label)
         layout.addWidget(folder_box)
 
         self.table = QTableWidget(0, len(HEADERS))
@@ -115,6 +132,7 @@ class MainWindow(QMainWindow):
         labels = {
             "track_number": "Track", "disc_number": "Disc", "artist": "Artist",
             "title": "Title", "album": "Album", "album_artist": "Album Artist",
+            "album_label": "Album Label",
             "language": "Language", "dance_style": "DANCE_STYLE",
             "dance_tempo": "DANCE_TEMPO", "year": "Year",
         }
@@ -136,6 +154,7 @@ class MainWindow(QMainWindow):
         rename_layout = QHBoxLayout(rename_box)
         self.rename_files = QCheckBox("Переименовывать после записи тегов")
         self.rename_template = QLineEdit(DEFAULT_RENAME_TEMPLATE)
+        self.rename_template.textEdited.connect(self._rename_template_edited)
         self.rename_template.setToolTip(
             "Доступно: {disc}, {disc_prefix}, {track}, {artist}, {title}, {album}, {year}"
         )
@@ -162,6 +181,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log)
         self.setCentralWidget(root)
         self.statusBar().showMessage("Режим preview: файлы не изменяются")
+
+    def _rename_template_edited(self, _text: str):
+        self.rename_files.setChecked(True)
+        self.statusBar().showMessage(
+            "Переименование включено: новый шаблон применится даже без изменений тегов"
+        )
 
     def append_log(self, message: str):
         self.log.appendPlainText(message)
@@ -214,6 +239,9 @@ class MainWindow(QMainWindow):
         self.album = album
         self.url.setText(album.source_url)
         self.album_title.setText(album.title)
+        self.album_artist.setText(album.album_artist)
+        self.album_year.setText(album.year)
+        self.album_label.setText(album.album_label)
         self.append_log(f"Загружен альбом «{album.title}»: {len(album.tracks)} треков.")
         self.rematch()
 
@@ -228,12 +256,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Нет папки", "Сначала выберите папку с аудиофайлами.")
             return
         self.run_worker(
-            lambda: scan_folder(folder), self.files_loaded, "Сканирование аудиофайлов…",
+            lambda: (scan_folder(folder), find_cover_image(folder)),
+            self.files_loaded, "Сканирование аудиофайлов…",
         )
 
-    def files_loaded(self, files):
+    def files_loaded(self, result):
+        files, cover_file = result
         self.files = files
+        self.cover_file = cover_file
         self.append_log(f"В папке найдено аудиофайлов: {len(files)}.")
+        if cover_file:
+            self.cover_label.setText(f"Обложка: {cover_file.name}")
+            self.append_log(f"Найдена обложка: {cover_file.name}.")
+        else:
+            self.cover_label.setText("Обложка: не найдена")
         if self.album and len(files) != len(self.album.tracks):
             self.append_log(
                 f"Внимание: в папке найдено {len(files)} файлов, а на странице — {len(self.album.tracks)} треков."
@@ -306,7 +342,13 @@ class MainWindow(QMainWindow):
 
     def _sync_edits(self):
         if self.album:
-            update_album_title(self.album, self.album_title.text())
+            update_album_details(
+                self.album,
+                title=self.album_title.text(),
+                album_artist=self.album_artist.text(),
+                year=self.album_year.text(),
+                album_label=self.album_label.text(),
+            )
         for row, match in enumerate(self.matches):
             match.enabled = self.table.item(row, 0).checkState() == Qt.CheckState.Checked
             match.track.artist = self.table.item(row, 6).text().strip()
@@ -343,6 +385,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Нет файлов", "Нет выбранных надёжных или проверенных сопоставлений.")
             return
         options = self.options()
+        cover_data = None
+        if self.write_cover.isChecked() and self.cover_file:
+            try:
+                cover_data = load_cover_image(self.cover_file)
+            except Exception as exc:
+                QMessageBox.critical(self, "Ошибка обложки", str(exc))
+                return
         rename_enabled = self.rename_files.isChecked()
         rename_template = self.rename_template.text().strip() or DEFAULT_RENAME_TEMPLATE
         rename_count = 0
@@ -371,6 +420,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self, "Подтверждение записи",
             f"Будут обработаны файлы: {len(selected)}\nИзменений тегов: {total_changes}\n\n"
+            f"Обложка: {self.cover_file.name if cover_data else 'не изменяется'}\n"
             f"Переименований: {rename_count}\n\n"
             "Перед записью будет создан backup JSON. Продолжить?",
         )
@@ -391,9 +441,12 @@ class MainWindow(QMainWindow):
                 try:
                     current = self.tags.read_current(path)
                     changes = build_change_plan(match, current, options)
-                    if changes:
+                    values = {change.field: change.new_value for change in changes}
+                    if cover_data:
+                        values["cover_art"] = cover_data
+                    if values:
                         self.tags.write_atomic(
-                            path, {change.field: change.new_value for change in changes},
+                            path, values,
                             full_backup_dir,
                         )
                     new_path = path
@@ -406,7 +459,7 @@ class MainWindow(QMainWindow):
                                 renamed.append(f"{path.name} → {new_path.name}")
                         except Exception as exc:
                             rename_errors.append(f"{path.name}: {exc}")
-                    if changes or new_path != path:
+                    if values or new_path != path:
                         successes.append(new_path.name)
                     else:
                         skipped.append(path.name)

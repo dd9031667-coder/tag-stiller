@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import base64
 import shutil
 import tempfile
 from dataclasses import dataclass, fields
@@ -8,14 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from mutagen import File as MutagenFile
-from mutagen.flac import FLAC
+from mutagen.flac import FLAC, Picture
 from mutagen.id3 import (
-    TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, TXXX, ID3,
+    APIC, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPOS, TPUB, TRCK, TXXX, ID3,
     ID3NoHeaderError,
 )
-from mutagen.mp4 import MP4
+from mutagen.mp4 import MP4, MP4Cover
 from mutagen.oggopus import OggOpus
 from mutagen.oggvorbis import OggVorbis
+
+from app.audio.artwork import cover_from_value, cover_to_json
 
 
 @dataclass(slots=True)
@@ -26,6 +29,7 @@ class TagOptions:
     title: bool = True
     album: bool = True
     album_artist: bool = True
+    album_label: bool = True
     language: bool = True
     dance_style: bool = True
     dance_tempo: bool = True
@@ -40,7 +44,7 @@ class TagOptions:
 
 _CANONICAL = (
     "track_number", "disc_number", "artist", "title", "album", "album_artist",
-    "language", "dance_style", "dance_tempo", "year", "genre",
+    "language", "dance_style", "dance_tempo", "year", "album_label", "genre",
 )
 
 
@@ -53,6 +57,8 @@ def _scalar(value: Any) -> str:
         value = value[0] if value else ""
     if isinstance(value, tuple):
         value = value[0] if value else ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
     return str(value)
 
 
@@ -74,7 +80,7 @@ class TagService:
                 "artist": get("TPE1"), "title": get("TIT2"), "album": get("TALB"),
                 "album_artist": get("TPE2"), "language": custom("LANGUAGE"),
                 "dance_style": custom("DANCE_STYLE"), "dance_tempo": custom("DANCE_TEMPO"),
-                "year": get("TDRC"), "genre": get("TCON"),
+                "year": get("TDRC"), "album_label": get("TPUB"), "genre": get("TCON"),
             }
         audio = MutagenFile(path)
         if audio is None:
@@ -90,7 +96,9 @@ class TagService:
                 "language": atom("----:com.apple.iTunes:LANGUAGE"),
                 "dance_style": atom("----:com.apple.iTunes:DANCE_STYLE"),
                 "dance_tempo": atom("----:com.apple.iTunes:DANCE_TEMPO"),
-                "year": atom("\xa9day"), "genre": atom("\xa9gen"),
+                "year": atom("\xa9day"),
+                "album_label": atom("----:com.apple.iTunes:LABEL"),
+                "genre": atom("\xa9gen"),
             }
         def vorbis(key: str) -> str:
             return _scalar(tags.get(key) or tags.get(key.upper()))
@@ -99,8 +107,51 @@ class TagService:
             "artist": vorbis("artist"), "title": vorbis("title"), "album": vorbis("album"),
             "album_artist": vorbis("albumartist"), "language": vorbis("language"),
             "dance_style": vorbis("dance_style"), "dance_tempo": vorbis("dance_tempo"),
-            "year": vorbis("date"), "genre": vorbis("genre"),
+            "year": vorbis("date"), "album_label": vorbis("label"),
+            "genre": vorbis("genre"),
         }
+
+    def snapshot(self, path: str | Path) -> dict[str, Any]:
+        """Снимок поддерживаемых тегов, включая обложку для JSON-backup."""
+        values: dict[str, Any] = self.read_current(path)
+        values["cover_art"] = cover_to_json(self.read_cover(path))
+        return values
+
+    def read_cover(self, path: str | Path) -> dict[str, Any] | None:
+        path = Path(path)
+        suffix = path.suffix.lower()
+        if suffix == ".mp3":
+            try:
+                tags = ID3(path)
+            except ID3NoHeaderError:
+                return None
+            pictures = tags.getall("APIC")
+            if not pictures:
+                return None
+            return {"mime": pictures[0].mime or "image/jpeg", "data": pictures[0].data}
+        audio = MutagenFile(path)
+        if audio is None:
+            return None
+        if isinstance(audio, MP4):
+            covers = (audio.tags or {}).get("covr", [])
+            if not covers:
+                return None
+            cover = covers[0]
+            image_format = getattr(cover, "imageformat", None)
+            mime = "image/png" if image_format == MP4Cover.FORMAT_PNG else "image/jpeg"
+            return {"mime": mime, "data": bytes(cover)}
+        if isinstance(audio, FLAC):
+            if not audio.pictures:
+                return None
+            picture = audio.pictures[0]
+            return {"mime": picture.mime or "image/jpeg", "data": picture.data}
+        if isinstance(audio, (OggVorbis, OggOpus)):
+            encoded = (audio.tags or {}).get("metadata_block_picture", [])
+            if not encoded:
+                return None
+            picture = Picture(base64.b64decode(encoded[0]))
+            return {"mime": picture.mime or "image/jpeg", "data": picture.data}
+        return None
 
     def write_atomic(
         self,
@@ -147,7 +198,8 @@ class TagService:
             "track_number": ("TRCK", TRCK), "disc_number": ("TPOS", TPOS),
             "artist": ("TPE1", TPE1), "title": ("TIT2", TIT2),
             "album": ("TALB", TALB), "album_artist": ("TPE2", TPE2),
-            "year": ("TDRC", TDRC), "genre": ("TCON", TCON),
+            "year": ("TDRC", TDRC), "album_label": ("TPUB", TPUB),
+            "genre": ("TCON", TCON),
         }
         for key, (frame_id, cls) in frames.items():
             if key not in values:
@@ -164,6 +216,14 @@ class TagService:
             tags.delall(f"TXXX:{description}")
             if values[key] not in ("", None):
                 tags.add(TXXX(encoding=3, desc=description, text=[str(values[key])]))
+        if "cover_art" in values:
+            tags.delall("APIC")
+            cover = cover_from_value(values["cover_art"])
+            if cover:
+                mime, data = cover
+                tags.add(APIC(
+                    encoding=3, mime=mime, type=3, desc="Cover", data=data,
+                ))
         tags.save(path, v2_version=4)
 
     @staticmethod
@@ -178,7 +238,7 @@ class TagService:
             "artist": "ARTIST", "title": "TITLE", "album": "ALBUM",
             "album_artist": "ALBUMARTIST", "language": "LANGUAGE",
             "dance_style": "DANCE_STYLE", "dance_tempo": "DANCE_TEMPO",
-            "year": "DATE", "genre": "GENRE",
+            "year": "DATE", "album_label": "LABEL", "genre": "GENRE",
         }
         for key, tag in keys.items():
             if key not in values:
@@ -187,6 +247,29 @@ class TagService:
                 audio.tags.pop(tag, None)
             else:
                 audio.tags[tag] = [str(values[key])]
+        if "cover_art" in values:
+            cover = cover_from_value(values["cover_art"])
+            if isinstance(audio, FLAC):
+                audio.clear_pictures()
+                if cover:
+                    mime, data = cover
+                    picture = Picture()
+                    picture.type = 3
+                    picture.mime = mime
+                    picture.desc = "Cover"
+                    picture.data = data
+                    audio.add_picture(picture)
+            else:
+                audio.tags.pop("METADATA_BLOCK_PICTURE", None)
+                if cover:
+                    mime, data = cover
+                    picture = Picture()
+                    picture.type = 3
+                    picture.mime = mime
+                    picture.desc = "Cover"
+                    picture.data = data
+                    encoded = base64.b64encode(picture.write()).decode("ascii")
+                    audio.tags["METADATA_BLOCK_PICTURE"] = [encoded]
         audio.save()
 
     @staticmethod
@@ -210,12 +293,27 @@ class TagService:
                     audio.tags.pop(atom, None)
                 else:
                     audio.tags[atom] = [(int(values[key]), 0)]
-        for key in ("language", "dance_style", "dance_tempo"):
+        custom_atoms = {
+            "language": "LANGUAGE",
+            "dance_style": "DANCE_STYLE",
+            "dance_tempo": "DANCE_TEMPO",
+            "album_label": "LABEL",
+        }
+        for key, atom_name in custom_atoms.items():
             if key in values:
-                atom = f"----:com.apple.iTunes:{key.upper()}"
+                atom = f"----:com.apple.iTunes:{atom_name}"
                 if values[key] in ("", None):
                     audio.tags.pop(atom, None)
                 else:
                     audio.tags[atom] = [str(values[key]).encode("utf-8")]
+        if "cover_art" in values:
+            audio.tags.pop("covr", None)
+            cover = cover_from_value(values["cover_art"])
+            if cover:
+                mime, data = cover
+                image_format = (
+                    MP4Cover.FORMAT_PNG if mime == "image/png"
+                    else MP4Cover.FORMAT_JPEG
+                )
+                audio.tags["covr"] = [MP4Cover(data, imageformat=image_format)]
         audio.save()
-

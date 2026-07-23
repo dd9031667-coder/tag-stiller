@@ -31,11 +31,14 @@ def test_fixture_parser():
     album = CasaMusicaHtmlParser().parse(html, "https://example.test")
     assert album.title == "Rimini Open Vol. 01"
     assert album.album_artist == "Prandi Sound Orchestra"
+    assert album.album_label == "Prandi Sound Records"
     assert album.year == "2000"
     assert len(album.tracks) == 3
     assert album.tracks[0].title == "Spring"
     assert album.tracks[0].dance_style == "Slow Waltz"
     assert album.tracks[0].dance_tempo == "29"
+    assert album.tracks[0].album_artist == "Prandi Sound Orchestra"
+    assert album.tracks[0].album_label == "Prandi Sound Records"
     assert album.tracks[0].duration_seconds == 184
     assert album.tracks[2].disc_number == 3
     assert album.tracks[2].track_number == 4

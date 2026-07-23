@@ -26,6 +26,7 @@ class TrackMetadata:
     album_artist: str = ""
     year: str = ""
     source_url: str = ""
+    album_label: str = ""
 
 
 @dataclass(slots=True)
@@ -35,6 +36,7 @@ class AlbumMetadata:
     album_artist: str = ""
     year: str = ""
     source_url: str = ""
+    album_label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,6 +50,7 @@ class AlbumMetadata:
             album_artist=data.get("album_artist", ""),
             year=str(data.get("year", "") or ""),
             source_url=data.get("source_url", ""),
+            album_label=data.get("album_label", ""),
         )
 
 
@@ -84,4 +87,3 @@ class BackupRecord:
     format: str
     tags: dict[str, Any]
     created_at: str
-

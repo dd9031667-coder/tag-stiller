@@ -18,7 +18,11 @@ class BackupService:
             BackupRecord(
                 path=str(Path(path).resolve()),
                 format=Path(path).suffix.lower().lstrip("."),
-                tags=self.tags.read_current(path),
+                tags=(
+                    self.tags.snapshot(path)
+                    if hasattr(self.tags, "snapshot")
+                    else self.tags.read_current(path)
+                ),
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
             for path in audio_paths
