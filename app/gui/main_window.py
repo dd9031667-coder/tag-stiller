@@ -812,8 +812,8 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = folder / f"tagstiller-backup-{stamp}.json"
-        full_backup_dir = folder / f"tagstiller-files-{stamp}" if self.full_backup.isChecked() else None
+        backup_path = folder / f"{stamp}.json"
+        full_backup_dir = folder / stamp if self.full_backup.isChecked() else None
 
         def operation():
             operation_backup_path = backup_path
