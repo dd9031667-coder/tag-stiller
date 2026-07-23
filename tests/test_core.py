@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.audio.scanner import extract_track_position
+from app.audio.scanner import extract_title_hint, extract_track_position
 from app.matching import match_tracks
 from app.models import AlbumMetadata, LocalAudioFile, MatchStatus, TrackMetadata
 from app.providers.html_parser import CasaMusicaHtmlParser
@@ -20,6 +20,16 @@ from app.utils.text import normalize_text, split_title_dance_suffix
 ])
 def test_extract_track_position(name, expected):
     assert extract_track_position(name) == expected
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("01 - Song Name.mp3", "Song Name"),
+    ("Track 01 - Song_Name.mp3", "Song Name"),
+    ("CD1-01 Song Name.mp3", "Song Name"),
+    ("1-01 Song Name.flac", "Song Name"),
+])
+def test_extract_title_hint(name, expected):
+    assert extract_title_hint(name) == expected
 
 
 def test_normalize_title():

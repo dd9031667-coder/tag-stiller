@@ -26,8 +26,10 @@ from app.services.album_io import (
     export_album_csv, load_album_json, save_album_json, update_album_details,
 )
 from app.services.backup import BackupService
+from app.services.local_editing import build_local_editing_session
 from app.services.renaming import (
-    DEFAULT_RENAME_TEMPLATE, build_audio_filename, rename_audio_file,
+    DEFAULT_RENAME_TEMPLATE, album_folder_target, build_audio_filename,
+    rename_album_folder, rename_audio_file,
 )
 from app.services.tagging import build_change_plan
 from app.gui.worker import Worker
@@ -101,6 +103,8 @@ class MainWindow(QMainWindow):
         choose.clicked.connect(self.choose_folder)
         scan = QPushButton("Сканировать папку")
         scan.clicked.connect(self.scan)
+        local_edit = QPushButton("Редактировать без HTML")
+        local_edit.clicked.connect(self.edit_local)
         self.tolerance = QDoubleSpinBox()
         self.tolerance.setRange(0, 60)
         self.tolerance.setValue(4)
@@ -111,6 +115,7 @@ class MainWindow(QMainWindow):
         folder_layout.addWidget(self.folder, 1)
         folder_layout.addWidget(choose)
         folder_layout.addWidget(scan)
+        folder_layout.addWidget(local_edit)
         folder_layout.addWidget(QLabel("Допуск длительности:"))
         folder_layout.addWidget(self.tolerance)
         folder_layout.addWidget(self.write_cover)
@@ -150,7 +155,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.full_backup)
         layout.addWidget(settings)
 
-        rename_box = QGroupBox("4. Переименование файлов")
+        rename_box = QGroupBox("4. Переименование файлов и папки")
         rename_layout = QHBoxLayout(rename_box)
         self.rename_files = QCheckBox("Переименовывать после записи тегов")
         self.rename_template = QLineEdit(DEFAULT_RENAME_TEMPLATE)
@@ -161,6 +166,10 @@ class MainWindow(QMainWindow):
         rename_layout.addWidget(self.rename_files)
         rename_layout.addWidget(QLabel("Шаблон:"))
         rename_layout.addWidget(self.rename_template, 1)
+        self.rename_folder = QCheckBox(
+            "Переименовать папку: Album Label - Album Name (Album Year)"
+        )
+        rename_layout.addWidget(self.rename_folder)
         layout.addWidget(rename_box)
 
         actions = QHBoxLayout()
@@ -238,12 +247,15 @@ class MainWindow(QMainWindow):
             track.dance_tempo = track.dance_tempo or dance_tempo
         self.album = album
         self.url.setText(album.source_url)
+        self._show_album_metadata(album)
+        self.append_log(f"Загружен альбом «{album.title}»: {len(album.tracks)} треков.")
+        self.rematch()
+
+    def _show_album_metadata(self, album: AlbumMetadata):
         self.album_title.setText(album.title)
         self.album_artist.setText(album.album_artist)
         self.album_year.setText(album.year)
         self.album_label.setText(album.album_label)
-        self.append_log(f"Загружен альбом «{album.title}»: {len(album.tracks)} треков.")
-        self.rematch()
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Папка с аудиофайлами")
@@ -259,6 +271,47 @@ class MainWindow(QMainWindow):
             lambda: (scan_folder(folder), find_cover_image(folder)),
             self.files_loaded, "Сканирование аудиофайлов…",
         )
+
+    def edit_local(self):
+        folder = self.folder.text().strip()
+        if not folder:
+            QMessageBox.warning(
+                self, "Нет папки", "Сначала выберите папку с аудиофайлами.",
+            )
+            return
+
+        def operation():
+            files = scan_folder(folder)
+            album, matches = build_local_editing_session(files, self.tags)
+            cover = find_cover_image(folder)
+            return album, files, matches, cover
+
+        self.run_worker(
+            operation, self.local_session_loaded,
+            "Чтение существующих тегов…",
+        )
+
+    def local_session_loaded(self, result):
+        album, files, matches, cover_file = result
+        if not files:
+            QMessageBox.information(
+                self, "Нет файлов", "В выбранной папке не найдено поддерживаемых аудиофайлов.",
+            )
+            return
+        self.album = album
+        self.files = files
+        self.matches = matches
+        self.cover_file = cover_file
+        self.url.clear()
+        self._show_album_metadata(album)
+        self.cover_label.setText(
+            f"Обложка: {cover_file.name}" if cover_file else "Обложка: не найдена"
+        )
+        self.append_log(
+            f"Локальный режим: загружено файлов {len(files)}. "
+            "Проверьте жёлтые строки и общие поля альбома."
+        )
+        self.fill_table()
 
     def files_loaded(self, result):
         files, cover_file = result
@@ -319,7 +372,7 @@ class MainWindow(QMainWindow):
                 if column == 0:
                     item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
                     item.setCheckState(Qt.CheckState.Checked if match.enabled and local else Qt.CheckState.Unchecked)
-                elif column not in {4, 6, 8, 9, 10, 11}:
+                elif column not in {2, 3, 4, 6, 8, 9, 10, 11}:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 item.setBackground(colors[match.status])
                 self.table.setItem(row, column, item)
@@ -351,6 +404,14 @@ class MainWindow(QMainWindow):
             )
         for row, match in enumerate(self.matches):
             match.enabled = self.table.item(row, 0).checkState() == Qt.CheckState.Checked
+            disc_text = self.table.item(row, 2).text().strip()
+            track_text = self.table.item(row, 3).text().strip()
+            if disc_text and (not disc_text.isdigit() or int(disc_text) < 1):
+                raise ValueError(f"Строка {row + 1}: номер диска должен быть положительным числом.")
+            if not track_text.isdigit() or int(track_text) < 1:
+                raise ValueError(f"Строка {row + 1}: номер трека должен быть положительным числом.")
+            match.track.disc_number = int(disc_text) if disc_text else None
+            match.track.track_number = int(track_text)
             match.track.artist = self.table.item(row, 6).text().strip()
             title, style_from_title, tempo_from_title = split_title_dance_suffix(
                 self.table.item(row, 8).text()
@@ -376,7 +437,11 @@ class MainWindow(QMainWindow):
         )
 
     def write_tags(self):
-        self._sync_edits()
+        try:
+            self._sync_edits()
+        except ValueError as exc:
+            QMessageBox.critical(self, "Некорректный номер", str(exc))
+            return
         selected = [
             match for match in self.matches
             if match.enabled and match.local_file and match.status is not MatchStatus.RED
@@ -393,6 +458,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Ошибка обложки", str(exc))
                 return
         rename_enabled = self.rename_files.isChecked()
+        folder_rename_enabled = self.rename_folder.isChecked()
         rename_template = self.rename_template.text().strip() or DEFAULT_RENAME_TEMPLATE
         rename_count = 0
         if rename_enabled:
@@ -413,6 +479,16 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.critical(self, "Ошибка шаблона", str(exc))
                 return
+        folder = Path(self.folder.text() or selected[0].local_file.path.parent).resolve()
+        folder_target = None
+        if folder_rename_enabled:
+            folder_target = album_folder_target(folder, self.album)
+            if folder_target != folder and folder_target.exists():
+                QMessageBox.critical(
+                    self, "Папка уже существует",
+                    f"Нельзя переименовать папку: «{folder_target.name}» уже существует.",
+                )
+                return
         total_changes = sum(
             len(build_change_plan(match, self.tags.read_current(match.local_file.path), options))
             for match in selected
@@ -422,11 +498,11 @@ class MainWindow(QMainWindow):
             f"Будут обработаны файлы: {len(selected)}\nИзменений тегов: {total_changes}\n\n"
             f"Обложка: {self.cover_file.name if cover_data else 'не изменяется'}\n"
             f"Переименований: {rename_count}\n\n"
+            f"Папка: {folder_target.name if folder_target else 'не изменяется'}\n\n"
             "Перед записью будет создан backup JSON. Продолжить?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        folder = Path(self.folder.text() or selected[0].local_file.path.parent)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_path = folder / f"tagstiller-backup-{stamp}.json"
         full_backup_dir = folder / f"tagstiller-files-{stamp}" if self.full_backup.isChecked() else None
@@ -467,19 +543,61 @@ class MainWindow(QMainWindow):
                     logging.exception("Не удалось записать %s", path)
                     errors.append(f"{path.name}: {exc}")
             self.backups.remap_paths(backup_path, path_mapping)
-            return successes, skipped, errors, renamed, rename_errors, backup_path
+            old_folder = folder
+            new_folder = folder
+            folder_error = ""
+            if folder_rename_enabled:
+                try:
+                    new_folder = rename_album_folder(old_folder, self.album)
+                    if new_folder != old_folder:
+                        moved_mapping: dict[str, str] = {}
+                        for match in selected:
+                            current_path = match.local_file.path.resolve()
+                            if current_path.is_relative_to(old_folder):
+                                moved_path = new_folder / current_path.relative_to(old_folder)
+                                moved_mapping[str(current_path)] = str(moved_path)
+                        backup_path = new_folder / backup_path.name
+                        self.backups.remap_paths(backup_path, moved_mapping)
+                except Exception as exc:
+                    logging.exception("Не удалось переименовать папку %s", old_folder)
+                    folder_error = str(exc)
+                    new_folder = old_folder
+            return (
+                successes, skipped, errors, renamed, rename_errors, backup_path,
+                old_folder, new_folder, folder_error,
+            )
 
         self.run_worker(operation, self.write_finished, "Запись тегов…")
 
     def write_finished(self, result):
-        successes, skipped, errors, renamed, rename_errors, backup = result
+        (
+            successes, skipped, errors, renamed, rename_errors, backup,
+            old_folder, new_folder, folder_error,
+        ) = result
+        if new_folder != old_folder:
+            local_objects = self.files + [
+                match.local_file for match in self.matches if match.local_file
+            ]
+            seen: set[int] = set()
+            for local in local_objects:
+                if id(local) in seen:
+                    continue
+                seen.add(id(local))
+                current = local.path.resolve()
+                if current.is_relative_to(old_folder):
+                    local.path = new_folder / current.relative_to(old_folder)
+            if self.cover_file and self.cover_file.resolve().is_relative_to(old_folder):
+                self.cover_file = new_folder / self.cover_file.resolve().relative_to(old_folder)
+            self.folder.setText(str(new_folder))
+            self.append_log(f"Папка переименована: {old_folder.name} → {new_folder.name}")
         conflicts = sum(match.status is MatchStatus.RED for match in self.matches)
         excluded = sum(not match.enabled for match in self.matches)
         self.append_log(f"Backup тегов: {backup}")
         self.append_log(
             f"Успешно: {len(successes)}; без изменений: {len(skipped)}; "
             f"переименовано: {len(renamed)}; исключено: {excluded}; "
-            f"конфликтов: {conflicts}; ошибки: {len(errors) + len(rename_errors)}."
+            f"конфликтов: {conflicts}; "
+            f"ошибки: {len(errors) + len(rename_errors) + bool(folder_error)}."
         )
         for item in renamed:
             self.append_log(f"Переименовано: {item}")
@@ -487,6 +605,8 @@ class MainWindow(QMainWindow):
             self.append_log(f"Теги записаны, но файл не переименован: {error}")
         for error in errors:
             self.append_log(f"Файл не был изменён из-за ошибки записи тегов: {error}")
+        if folder_error:
+            self.append_log(f"Папка не была переименована: {folder_error}")
         self.fill_table()
         QMessageBox.information(
             self, "Итоговый отчёт",
@@ -494,6 +614,8 @@ class MainWindow(QMainWindow):
             f"Переименовано: {len(renamed)}\n"
             f"Исключено пользователем: {excluded}\nКонфликтов: {conflicts}\n"
             f"Ошибки записи: {len(errors)}\nОшибки переименования: {len(rename_errors)}"
+            f"\nПапка: {'переименована' if new_folder != old_folder else 'без изменений'}"
+            f"\nОшибка папки: {folder_error or 'нет'}"
             f"\n\nBackup: {backup}",
         )
 
@@ -516,7 +638,11 @@ class MainWindow(QMainWindow):
         if not self.album:
             QMessageBox.warning(self, "Нет данных", "Сначала загрузите данные альбома.")
             return
-        self._sync_edits()
+        try:
+            self._sync_edits()
+        except ValueError as exc:
+            QMessageBox.critical(self, "Некорректный номер", str(exc))
+            return
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить JSON", f"{self.album.title}.json", "JSON (*.json)")
         if path:
             save_album_json(self.album, path)
@@ -526,7 +652,11 @@ class MainWindow(QMainWindow):
         if not self.album:
             QMessageBox.warning(self, "Нет данных", "Сначала загрузите данные альбома.")
             return
-        self._sync_edits()
+        try:
+            self._sync_edits()
+        except ValueError as exc:
+            QMessageBox.critical(self, "Некорректный номер", str(exc))
+            return
         path, _ = QFileDialog.getSaveFileName(self, "Экспорт CSV", f"{self.album.title}.csv", "CSV (*.csv)")
         if path:
             export_album_csv(self.album, path)

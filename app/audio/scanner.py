@@ -31,6 +31,22 @@ def extract_track_position(filename: str) -> tuple[int | None, int | None]:
     return None, None
 
 
+def extract_title_hint(filename: str) -> str:
+    """Название из имени файла без распознанного префикса диска/трека."""
+    stem = Path(filename).stem.strip()
+    patterns = [
+        re.compile(r"(?i)^\s*cd\s*\d+\s*[-_. ]+\s*\d{1,3}\s*[-_. )]*\s*"),
+        re.compile(r"^\s*\d+\s*[-_.]\s*\d{1,3}\s*[-_. )]*\s*"),
+        re.compile(r"(?i)^\s*track\s*\d{1,3}\s*[-_. )]*\s*"),
+        re.compile(r"^\s*\d{1,3}\s*[-_. )]+\s*"),
+    ]
+    for pattern in patterns:
+        cleaned = pattern.sub("", stem, count=1).strip()
+        if cleaned != stem:
+            return cleaned.replace("_", " ").strip() or stem
+    return stem.replace("_", " ").strip()
+
+
 def _first(tags: object, keys: tuple[str, ...]) -> str:
     if not tags:
         return ""
@@ -81,4 +97,3 @@ def scan_folder(folder: str | Path, recursive: bool = False) -> list[LocalAudioF
         key=lambda p: p.name.casefold(),
     )
     return [inspect_audio(path) for path in paths]
-

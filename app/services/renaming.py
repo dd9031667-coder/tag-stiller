@@ -5,7 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from app.models import TrackMetadata
+from app.models import AlbumMetadata, TrackMetadata
 
 
 DEFAULT_RENAME_TEMPLATE = "{disc_prefix}{track:02d} - {artist} - {title}"
@@ -63,4 +63,35 @@ def rename_audio_file(
     if target.exists():
         raise FileExistsError(f"Файл с именем «{target.name}» уже существует.")
     os.rename(source_path, target)
+    return target
+
+
+def build_album_folder_name(album: AlbumMetadata) -> str:
+    label = album.album_label.strip()
+    title = album.title.strip()
+    year = album.year.strip()
+    if label and title:
+        name = f"{label} - {title}"
+    else:
+        name = label or title or "Альбом"
+    if year:
+        name = f"{name} ({year})"
+    return sanitize_filename_component(name)
+
+
+def album_folder_target(folder: str | Path, album: AlbumMetadata) -> Path:
+    source = Path(folder).resolve()
+    return source.with_name(build_album_folder_name(album))
+
+
+def rename_album_folder(folder: str | Path, album: AlbumMetadata) -> Path:
+    source = Path(folder).resolve()
+    if not source.is_dir():
+        raise FileNotFoundError("Папка альбома не найдена.")
+    target = album_folder_target(source, album)
+    if source == target:
+        return source
+    if target.exists():
+        raise FileExistsError(f"Папка «{target.name}» уже существует.")
+    os.rename(source, target)
     return target

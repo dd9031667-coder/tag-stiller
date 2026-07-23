@@ -4,8 +4,10 @@ import pytest
 
 from app.models import TrackMetadata
 from app.services.renaming import (
-    build_audio_filename, rename_audio_file, sanitize_filename_component,
+    album_folder_target, build_album_folder_name, build_audio_filename,
+    rename_album_folder, rename_audio_file, sanitize_filename_component,
 )
+from app.models import AlbumMetadata
 
 
 def _track(**kwargs):
@@ -42,3 +44,30 @@ def test_rename_audio_file_and_collision(tmp_path):
     another.write_bytes(b"other")
     with pytest.raises(FileExistsError):
         rename_audio_file(another, _track())
+
+
+def test_build_and_rename_album_folder(tmp_path):
+    source = tmp_path / "old album"
+    source.mkdir()
+    (source / "track.mp3").write_bytes(b"audio")
+    album = AlbumMetadata(
+        "Rimini Open Vol. 01", album_artist="Prandi Sound Orchestra",
+        year="2000", album_label="Prandi Sound Records",
+    )
+    assert build_album_folder_name(album) == (
+        "Prandi Sound Records - Rimini Open Vol. 01 (2000)"
+    )
+    expected = tmp_path / "Prandi Sound Records - Rimini Open Vol. 01 (2000)"
+    assert album_folder_target(source, album) == expected
+    renamed = rename_album_folder(source, album)
+    assert renamed == expected
+    assert (renamed / "track.mp3").read_bytes() == b"audio"
+
+
+def test_album_folder_collision_is_rejected(tmp_path):
+    source = tmp_path / "old"
+    source.mkdir()
+    album = AlbumMetadata("Album", year="2024", album_label="Label")
+    album_folder_target(source, album).mkdir()
+    with pytest.raises(FileExistsError):
+        rename_album_folder(source, album)
