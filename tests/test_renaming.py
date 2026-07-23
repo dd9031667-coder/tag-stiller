@@ -4,7 +4,6 @@ import pytest
 
 from app.models import TrackMetadata
 from app.services.renaming import (
-    FOLDER_FORMAT_LABEL_TITLE_YEAR, FOLDER_FORMAT_TITLE_YEAR,
     album_folder_target, build_album_folder_name, build_audio_filename,
     rename_album_folder, rename_audio_file, sanitize_filename_component,
 )
@@ -56,16 +55,16 @@ def test_build_and_rename_album_folder(tmp_path):
         year="2000", album_label="Prandi Sound Records",
     )
     assert build_album_folder_name(
-        album, FOLDER_FORMAT_LABEL_TITLE_YEAR,
+        album, "{label} - {album} ({year})",
     ) == (
         "Prandi Sound Records - Rimini Open Vol. 01 (2000)"
     )
     expected = tmp_path / "Prandi Sound Records - Rimini Open Vol. 01 (2000)"
     assert album_folder_target(
-        source, album, FOLDER_FORMAT_LABEL_TITLE_YEAR,
+        source, album, "{label} - {album} ({year})",
     ) == expected
     renamed = rename_album_folder(
-        source, album, FOLDER_FORMAT_LABEL_TITLE_YEAR,
+        source, album, "{label} - {album} ({year})",
     )
     assert renamed == expected
     assert (renamed / "track.mp3").read_bytes() == b"audio"
@@ -87,10 +86,26 @@ def test_build_album_folder_as_title_and_year():
         album_label="Prandi Sound Records",
     )
     assert build_album_folder_name(
-        album, FOLDER_FORMAT_TITLE_YEAR,
+        album, "{album} - {year}",
     ) == "Rimini Open Vol. 01 - 2000"
 
 
 def test_title_and_year_format_handles_missing_year():
     album = AlbumMetadata("Rimini Open Vol. 01")
-    assert build_album_folder_name(album) == "Rimini Open Vol. 01"
+    assert build_album_folder_name(album, "{album}") == "Rimini Open Vol. 01"
+
+
+def test_album_folder_template_supports_album_artist():
+    album = AlbumMetadata(
+        "Rimini Open Vol. 01",
+        album_artist="Prandi Sound Orchestra",
+        year="2000",
+    )
+    assert build_album_folder_name(
+        album, "{album_artist} - {album} - {year}",
+    ) == "Prandi Sound Orchestra - Rimini Open Vol. 01 - 2000"
+
+
+def test_unknown_album_folder_placeholder_is_rejected():
+    with pytest.raises(ValueError, match="Некорректный шаблон"):
+        build_album_folder_name(AlbumMetadata("Album"), "{unknown}")

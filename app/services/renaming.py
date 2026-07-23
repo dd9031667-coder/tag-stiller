@@ -9,9 +9,7 @@ from app.models import AlbumMetadata, TrackMetadata
 
 
 DEFAULT_RENAME_TEMPLATE = "{disc_prefix}{track:02d} - {artist} - {title}"
-FOLDER_FORMAT_LABEL_TITLE_YEAR = "label-title-year"
-FOLDER_FORMAT_TITLE_YEAR = "title-year"
-DEFAULT_FOLDER_FORMAT = FOLDER_FORMAT_TITLE_YEAR
+DEFAULT_FOLDER_TEMPLATE = "{album} - {year}"
 _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED = {
     "CON", "PRN", "AUX", "NUL",
@@ -71,44 +69,39 @@ def rename_audio_file(
 
 def build_album_folder_name(
     album: AlbumMetadata,
-    folder_format: str = DEFAULT_FOLDER_FORMAT,
+    template: str = DEFAULT_FOLDER_TEMPLATE,
 ) -> str:
-    label = album.album_label.strip()
-    title = album.title.strip()
-    year = album.year.strip()
-    if folder_format == FOLDER_FORMAT_TITLE_YEAR:
-        name = " - ".join(value for value in (title, year) if value)
-        name = name or "Альбом"
-    elif folder_format == FOLDER_FORMAT_LABEL_TITLE_YEAR:
-        if label and title:
-            name = f"{label} - {title}"
-        else:
-            name = label or title or "Альбом"
-        if year:
-            name = f"{name} ({year})"
-    else:
-        raise ValueError("Неизвестный формат имени папки.")
+    values = {
+        "album": album.title.strip(),
+        "year": album.year.strip(),
+        "label": album.album_label.strip(),
+        "album_artist": album.album_artist.strip(),
+    }
+    try:
+        name = template.format_map(values)
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"Некорректный шаблон имени папки: {exc}") from exc
     return sanitize_filename_component(name)
 
 
 def album_folder_target(
     folder: str | Path,
     album: AlbumMetadata,
-    folder_format: str = DEFAULT_FOLDER_FORMAT,
+    template: str = DEFAULT_FOLDER_TEMPLATE,
 ) -> Path:
     source = Path(folder).resolve()
-    return source.with_name(build_album_folder_name(album, folder_format))
+    return source.with_name(build_album_folder_name(album, template))
 
 
 def rename_album_folder(
     folder: str | Path,
     album: AlbumMetadata,
-    folder_format: str = DEFAULT_FOLDER_FORMAT,
+    template: str = DEFAULT_FOLDER_TEMPLATE,
 ) -> Path:
     source = Path(folder).resolve()
     if not source.is_dir():
         raise FileNotFoundError("Папка альбома не найдена.")
-    target = album_folder_target(source, album, folder_format)
+    target = album_folder_target(source, album, template)
     if source == target:
         return source
     if target.exists():
